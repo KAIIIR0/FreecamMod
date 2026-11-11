@@ -7,6 +7,7 @@
 #include "ModUtils.h"
 
 #include "core/events.h"
+#include "core/game_data_manager.h"
 #include "core/settings_backup.h"
 #include "utils/debug.h"
 #include "utils/math.h"
@@ -45,15 +46,27 @@ void FreeCamera::Update(GameData::GameRend* gameRend, float deltaTime) {
     if (!freeCamera || !playerCamera) return;
 
     if (!gameRend->IsFreecamEnabled()) {
-        if (isEnabled) {
-            LOG_INFO("Freecam wasn't disabled properly, disabling now...");
-            DisableCamera(gameRend);
+        if (isEnabled && keepFreecamEnabled && GameDataManager::GetPlayer()) {
+            // The game turned the freecam off by itself (e.g. the player walked away
+            // from the camera). Turn it back on and keep the saved camera state
+            // instead of falling back to the player camera.
+            if (!gameDisabledFreecamLogged) {
+                LOG_INFO("Game disabled the freecam by itself, re-enabling (keep_freecam_enabled = true)");
+                gameDisabledFreecamLogged = true;
+            }
+            gameRend->EnableFreecam(disablePlayerControls);
         }
+        else {
+            if (isEnabled) {
+                LOG_INFO("Freecam wasn't disabled properly, disabling now...");
+                DisableCamera(gameRend);
+            }
 
-        if (resetCameraState || isFirstEnable) 
-            savedCameraState = *playerCamera;
+            if (resetCameraState || isFirstEnable) 
+                savedCameraState = *playerCamera;
 
-        return;
+            return;
+        }
     }
     
     UpdatePosition(freeCamera, deltaTime);
@@ -95,6 +108,8 @@ void FreeCamera::EnableCamera(GameData::GameRend* rend) {
     rollVelocity = 0.0f;
 
     frameStepper.Reset();
+
+    gameDisabledFreecamLogged = false;
 
     SettingsBackup::SaveOptionValue(OptionType::Freecam, true);
     ApplyGameOptions(true);
