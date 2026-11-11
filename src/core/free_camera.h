@@ -13,6 +13,7 @@ class FreeCamera {
     ConVar<bool>  freezePlayer           { "freecam", "freeze_player",                true  };
     ConVar<bool>  disablePlayerControls  { "freecam", "disable_player_controls",      true  };
     ConVar<bool>  resetCameraState       { "freecam", "reset_camera_state",           true  };
+    ConVar<bool>  keepFreecamEnabled     { "freecam", "keep_freecam_enabled",         true  };
 
     ConVar<bool>  hideHud                { "game_options", "hide_hud",                true  };
     ConVar<bool>  disableAntiAliasing    { "game_options", "disable_anti_aliasing",   false };
@@ -97,6 +98,7 @@ private:
     bool isFirstEnable = true;
     bool isSprinting = false;
     bool isFrozen = false;
+    bool gameDisabledFreecamLogged = false;
 
     GameStateManager gameStateManager{};
     FrameStepper frameStepper{ gameStateManager };
