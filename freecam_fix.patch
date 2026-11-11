@@ -1,0 +1,91 @@
+diff -ruN --strip-trailing-cr orig/src/core/features/game_state_manager.cpp src/FreecamMod-master/src/core/features/game_state_manager.cpp
+--- a/src/core/features/game_state_manager.cpp	2026-11-11 23:30:24.549418867 +0000
++++ b/src/core/features/game_state_manager.cpp	2026-11-11 23:30:24.593477861 +0000
+@@ -24,6 +24,14 @@
+ 		return;
+ 	}
+ 
++	// Sanity check: the entity list pointers can be garbage (e.g. outdated offset
++	// after a game update), which would make the loop below crash the game.
++	if (!world->begin || !world->end || world->end < world->begin
++		|| world->GetEntityListLength() > 20000) {
++		LOG_WARN("Entity list looks invalid (length = %zu), skipping freeze", (size_t)(world->end - world->begin));
++		return;
++	}
++
+ 	areEntitiesFrozen = enabled;
+ 
+ 	GameData::ChrIns* player = players->player0;
+diff -ruN --strip-trailing-cr orig/src/core/free_camera.cpp src/FreecamMod-master/src/core/free_camera.cpp
+--- a/src/core/free_camera.cpp	2026-11-11 23:30:24.549637457 +0000
++++ b/src/core/free_camera.cpp	2026-11-11 23:30:24.593027689 +0000
+@@ -7,6 +7,7 @@
+ #include "ModUtils.h"
+ 
+ #include "core/events.h"
++#include "core/game_data_manager.h"
+ #include "core/settings_backup.h"
+ #include "utils/debug.h"
+ #include "utils/math.h"
+@@ -45,15 +46,27 @@
+     if (!freeCamera || !playerCamera) return;
+ 
+     if (!gameRend->IsFreecamEnabled()) {
+-        if (isEnabled) {
+-            LOG_INFO("Freecam wasn't disabled properly, disabling now...");
+-            DisableCamera(gameRend);
++        if (isEnabled && keepFreecamEnabled && GameDataManager::GetPlayer()) {
++            // The game turned the freecam off by itself (e.g. the player walked away
++            // from the camera). Turn it back on and keep the saved camera state
++            // instead of falling back to the player camera.
++            if (!gameDisabledFreecamLogged) {
++                LOG_INFO("Game disabled the freecam by itself, re-enabling (keep_freecam_enabled = true)");
++                gameDisabledFreecamLogged = true;
++            }
++            gameRend->EnableFreecam(disablePlayerControls);
+         }
++        else {
++            if (isEnabled) {
++                LOG_INFO("Freecam wasn't disabled properly, disabling now...");
++                DisableCamera(gameRend);
++            }
+ 
+-        if (resetCameraState || isFirstEnable) 
+-            savedCameraState = *playerCamera;
++            if (resetCameraState || isFirstEnable) 
++                savedCameraState = *playerCamera;
+ 
+-        return;
++            return;
++        }
+     }
+     
+     UpdatePosition(freeCamera, deltaTime);
+@@ -96,6 +109,8 @@
+ 
+     frameStepper.Reset();
+ 
++    gameDisabledFreecamLogged = false;
++
+     SettingsBackup::SaveOptionValue(OptionType::Freecam, true);
+     ApplyGameOptions(true);
+     ApplyFreezeState(true);
+diff -ruN --strip-trailing-cr orig/src/core/free_camera.h src/FreecamMod-master/src/core/free_camera.h
+--- a/src/core/free_camera.h	2026-11-11 23:30:24.549674354 +0000
++++ b/src/core/free_camera.h	2026-11-11 23:30:24.593223957 +0000
+@@ -13,6 +13,7 @@
+     ConVar<bool>  freezePlayer           { "freecam", "freeze_player",                true  };
+     ConVar<bool>  disablePlayerControls  { "freecam", "disable_player_controls",      true  };
+     ConVar<bool>  resetCameraState       { "freecam", "reset_camera_state",           true  };
++    ConVar<bool>  keepFreecamEnabled     { "freecam", "keep_freecam_enabled",         true  };
+ 
+     ConVar<bool>  hideHud                { "game_options", "hide_hud",                true  };
+     ConVar<bool>  disableAntiAliasing    { "game_options", "disable_anti_aliasing",   false };
+@@ -97,6 +98,7 @@
+     bool isFirstEnable = true;
+     bool isSprinting = false;
+     bool isFrozen = false;
++    bool gameDisabledFreecamLogged = false;
+ 
+     GameStateManager gameStateManager{};
+     FrameStepper frameStepper{ gameStateManager };
