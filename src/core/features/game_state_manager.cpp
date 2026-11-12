@@ -24,6 +24,14 @@ void GameStateManager::FreezeEntities(bool enabled) {
 		return;
 	}
 
+	// Sanity check: the entity list pointers can be garbage (e.g. outdated offset
+	// after a game update), which would make the loop below crash the game.
+	if (!world->begin || !world->end || world->end < world->begin
+		|| world->GetEntityListLength() > 20000) {
+		LOG_WARN("Entity list looks invalid (length = %zu), skipping freeze", (size_t)(world->end - world->begin));
+		return;
+	}
+
 	areEntitiesFrozen = enabled;
 
 	GameData::ChrIns* player = players->player0;
