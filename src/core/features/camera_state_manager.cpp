@@ -1,155 +1,85 @@
-#include "core/features/game_state_manager.h"
-#include "core/game_data_manager.h"
+#include "core/features/camera_state_manager.h"
+
+#include "core/events.h"
+#include "utils/math.h"
 #include "utils/debug.h"
 
-void GameStateManager::FreezeGame(bool enabled) {
-	if (isGameFrozen != enabled) {
-		GameDataManager::PauseGame(enabled);
-		isGameFrozen = enabled;
-	}
+void CameraStateManager::SaveState(GameData::Camera* camera, int slot, const EulerAngles& yawPitchRoll) {
+	if (slot < 0 || slot >= MAX_SLOTS) return;
+	LOG_INFO("Saved slot %d", slot);
+
+	stateSlots[slot] = {
+		camera->matrix.position(),
+		Quaternion::fromRotationMatrix(camera->matrix.rotation()),
+		camera->fov,
+		yawPitchRoll,
+		true
+	};
+
+	EventBus::Emit(Event::SaveState{ slot, camera->matrix.position(), });
 }
 
+void CameraStateManager::StartLerpBetweenSlots(GameData::Camera* camera, Input::ReleasedNumkeys& positionSlots) {
+	slotOrder.clear();
+	if (positionSlots.empty()) return;
+	for (uint8_t slot : positionSlots) {
+		if (slot >= MAX_SLOTS) continue;
+		if (stateSlots[(int)slot].isSaved) slotOrder.push_back(slot);
+	}
+	if (slotOrder.empty()) return;
+	LOG_INFO("Interpolation started");
 
-void GameStateManager::FreezeEntities(bool enabled) {
-	if (areEntitiesFrozen == enabled) return;
+	isInterpolating = true;
+	interval = 0;
+	time = 0;
 
-	GameData::WorldChrMan* world = GameDataManager::WorldChrMan.Get();
-	if (!world) return;
+	EventBus::Emit(Event::Interpolate{ .isEnabled = true, .slots = slotOrder });
+}
 
-	GameData::Players* players = world->players;
-	if (!players) return;
-
-	if (!players->IsPlayerAlone()) {
-		LOG_INFO("Freezing entities in online is disabled");
+void CameraStateManager::Update(GameData::Camera* camera, EulerAngles* yawPitchRoll, float dt) {
+	if (!isInterpolating) return;
+	if (slotOrder.empty()) {
+		isInterpolating = false;
 		return;
 	}
 
-	// Sanity check: the entity list pointers can be garbage (e.g. outdated offset
-	// after a game update), which would make the loop below crash the game.
-	if (!world->begin || !world->end || world->end < world->begin
-		|| world->GetEntityListLength() > 20000) {
-		LOG_WARN("Entity list looks invalid (length = %zu), skipping freeze", (size_t)(world->end - world->begin));
-		return;
+	if (interval + 1 >= slotOrder.size()) {
+		const State& endState = stateSlots[slotOrder[interval]];
+		Lerp(camera, endState, endState, 1.0f);
+
+		if (yawPitchRoll) *yawPitchRoll = endState.yawPitchRoll;
+
+		isInterpolating = false;
+		LOG_INFO("Interpolation finished");
+		EventBus::Emit(Event::Interpolate{ .isEnabled = false });
 	}
+	else {
+		const State& startState = stateSlots[slotOrder[interval]];
+		const State& endState = stateSlots[slotOrder[interval + 1]];
 
-	areEntitiesFrozen = enabled;
+		const float t = Math::clamp(time / interpolationTime);
+		const float smootht = Math::smoothstep(t);
+		Lerp(camera, startState, endState, smootht);
 
-	GameData::ChrIns* player = players->player0;
-	const size_t length = world->GetEntityListLength();
-
-	LOG_INFO("Set FreezeEntity = %d to %zu entities", enabled, length);
-
-	for (size_t i = 0; i < length; ++i) {
-		GameData::ChrIns* entity = world->begin[i];
-		if (entity && entity != player) {
-			FreezeEntity(entity, enabled);
+		if (t == 1 || startState == endState) {
+			time = 0;
+			++interval;
+		}
+		else {
+			time += dt;
 		}
 	}
 }
 
-void GameStateManager::FreezePlayer(bool enabled) {
-	if (isPlayerFrozen == enabled) return;
-	isPlayerFrozen = enabled;
-
-	if (GameData::ChrIns* player = GameDataManager::GetPlayer()) {
-		FreezeEntity(player, enabled);
-	}
-}
-
-void GameStateManager::RemoveVignette(bool enabled) {
-	GameDataManager::RemoveVignette(enabled);
-}
-
-void GameStateManager::RemoveChromaticAberration(bool enabled) {
-	GameDataManager::RemoveChromaticAberration(enabled);
-}
-
-void GameStateManager::FreezeEntity(GameData::ChrIns* entity, bool enabled) {
-	if (!entity) return;
-
-	if (isZeroSpeedFreeze) {
-		entity->chrModules->chrBehavior->animationSpeed = !enabled;
-	}
-	else {
-		entity->flags2.noUpdate = enabled;
-	}
-	entity->flags1.noHit = enabled;
-	entity->chrModules->chrData->flags.noDamage = enabled;
-	entity->chrModules->chrData->flags.noDead = enabled;
-}
-
-void GameStateManager::SetOptionValueToRestore(OptionType type, std::optional<uint8_t> value) {
-	if (Option* option = GetOption(type)) {
-		option->valueToRestore = value;
-	}
-}
-
-void GameStateManager::DisableOption(OptionType type, bool enabled) {
-	GameData::OptionData* optionData = GameDataManager::GetOptionData();
-	GameData::Window* window = GameDataManager::Window.Get();
-
-	switch (type) {
-		case OptionType::HUD:			if (optionData) hud.Disable(&optionData->HUD, enabled); break;
-		case OptionType::AA:			if (window) aa.Disable(&window->AA, enabled); break;
-		case OptionType::MotionBlur:	if (window) mb.Disable(&window->motionBlur, enabled); break;
-	}
-}
-
-bool GameStateManager::RestoreOptions() {
-	if (wereRestored) return true;
-
-	if (GameData::OptionData* optionData = GameDataManager::GetOptionData()) {
-		hud.Restore(&optionData->HUD);
-	}
-	if (GameData::Window* window = GameDataManager::Window.Get()) {
-		aa.Restore(&window->AA);
-		mb.Restore(&window->motionBlur);
+void CameraStateManager::Lerp(GameData::Camera* camera, const State& startState, const State& endState, float t) {
+	if (startState == endState) {
+		camera->matrix.position() = startState.pos;
+		camera->matrix.rotation() = startState.rotation.toRotationMatrix();
+		camera->fov = startState.fov;
+		return;
 	}
 
-	wereRestored = true;
-	return true;
-}
-
-void GameStateManager::Option::Disable(uint8_t* gameOption, bool enabled) {
-	if (!gameOption || enabled == isDisabled) return;
-
-	if (enabled) {
-		savedValue = *gameOption;
-		*gameOption = 0;
-		SettingsBackup::SaveOptionValue(type, savedValue);
-	}
-	else {
-		*gameOption = savedValue;
-	}
-
-	isDisabled = enabled;
-}
-
-void GameStateManager::Option::Restore(uint8_t* gameOption) {
-	if (!gameOption || !valueToRestore) return;
-
-	uint8_t newValue = *valueToRestore;
-	if (*gameOption == newValue) return;
-
-	static constexpr const char* optionNames[] = {
-		"Freecam", "HUD", "Anti-aliasing", "Motion Blur"
-	};
-
-	static constexpr const char* valueNames[][4] = {
-		{ "OFF", "ON", "", "" },
-		{ "OFF", "ON", "AUTO", "" },
-		{ "OFF", "LOW", "", "HIGH" },
-		{ "OFF", "LOW", "MEDIUM", "HIGH" }
-	};
-
-	const size_t t = static_cast<size_t>(type);
-	uint8_t oldValue = *gameOption;
-
-	const char* oldStr = (t < std::size(valueNames) && oldValue < 4) ? valueNames[t][oldValue] : "?";
-	const char* newStr = (t < std::size(valueNames) && newValue < 4) ? valueNames[t][newValue] : "?";
-
-	LOG_INFO("Restored \"%s\" option from \"%s\" to \"%s\"", optionNames[t], oldStr, newStr);
-
-	*gameOption = newValue;
-	valueToRestore.reset();
+	camera->matrix.position() = Math::lerp(startState.pos, endState.pos, t);
+	camera->matrix.rotation() = Quaternion::slerp(startState.rotation, endState.rotation, t).toRotationMatrix();
+	camera->fov = Math::lerp(startState.fov, endState.fov, t);
 }
